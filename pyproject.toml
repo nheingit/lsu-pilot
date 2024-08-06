@@ -10,6 +10,11 @@ python = "^3.11"
 python-telegram-bot = "^21.4"
 openai = "^1.35.15"
 python-dotenv = "^1.0.1"
+pandas = "^2.2.2"
+tiktoken = "^0.7.0"
+langchain = "^0.2.12"
+numpy = "^1.21"
+scipy = "^1.14.0"
 
 
 [build-system]
