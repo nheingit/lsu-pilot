@@ -135,25 +135,6 @@ async def transcribe_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "Please choose a voice for the TTS:",
             reply_markup=reply_markup
         )
-        # tts_voice = "alloy"  # Choose the voice you prefer
-        # tts_model = "tts-1"
-        # tts_response = openai.audio.speech.create(
-        #     model=tts_model,
-        #     voice=tts_voice,
-        #     input=transcript.text
-        # )
-        
-        # # Save the TTS response to a file
-        # tts_voice_note_path = f"tts_voice_note_{voice_id}.mp3"
-        # tts_response.stream_to_file(tts_voice_note_path)
-        
-        # # Send the TTS-generated voice note back to the user
-        # with open(tts_voice_note_path, "rb") as tts_voice_note:
-        #     await context.bot.send_voice(
-        #         chat_id=update.effective_chat.id,
-        #         voice=tts_voice_note,
-        #         caption="Here is the TTS version of your message."
-        #     )
 
 
 async def voice_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
