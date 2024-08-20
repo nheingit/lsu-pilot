@@ -18,6 +18,9 @@ import requests
 from .questions import answer_question
 from .functions import functions, run_function
 
+from replicate import Client
+
+
 load_dotenv()  # take environment variables from .env.
 
 CODE_PROMPT = """
@@ -52,6 +55,11 @@ Make sure All HTML is generated with the JSX flavoring.
   }}></div>
 </div>
 """
+replicate_token = os.getenv('REPLICATE_API_TOKEN')
+
+client = Client(api_token=replicate_token)
+model = client.models.get("meta/llama-2-70b-chat")
+version = model.versions.get("2c1608e18606fad2812020dc541930f2d0495ce32eee50074220b87300bc16e1")
 
 tg_bot_token = os.getenv("TG_BOT_TOKEN")
 openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -63,6 +71,7 @@ csv_path = os.path.join(current_dir, "processed", "embeddings.csv")
 df = pd.read_csv(csv_path, index_col=0)
 df["embeddings"] = df["embeddings"].apply(eval).apply(np.array)
 
+message_history = []
 
 messages = [
     {
@@ -81,6 +90,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=update.effective_chat.id, text="I'm a bot, please talk to me!"
     )
+
+def generate_prompt(messages):
+  return "\n".join(f"[INST] {message['text']} [/INST]"
+                   if message['isUser'] else message['text']
+                   for message in messages)
 
 
 async def mozilla(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -112,66 +126,82 @@ async def transcribe_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"Transcript finished:\n {transcript.text}"
         )
 
-
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    messages.append({"role": "user", "content": update.message.text})
-    initial_response = openai.chat.completions.create(
-        model="gpt-4o-mini", messages=messages, tools=functions
-    )
-    initial_response_message = initial_response.choices[0].message
-    messages.append(initial_response_message)
-    final_response = None
-    tool_calls = initial_response_message.tool_calls
-    if tool_calls:
-        for tool_call in tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments)
-            response = run_function(name, args)
-            print(tool_calls)
-            messages.append(
-                {
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "name": name,
-                    "content": str(response),
-                }
-            )
-            if name == "svg_to_png_bytes":
-                await context.bot.send_photo(
-                    chat_id=update.effective_chat.id, photo=response
-                )
-                messages.append(
-                    {
-                        "tool_call_id": tool_call.id,
-                        "role": "system",
-                        "name": name,
-                        "content": "Image was sent to the user, do not send the base64 string to them.",
-                    }
-                )
-            # Generate the final response
-            final_response = openai.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-            )
-            final_answer = final_response.choices[0].message
+  message_history.append({"isUser": True, "text": update.message.text})
 
-            # Send the final response if it exists
-            if final_answer:
-                messages.append(final_answer)
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id, text=final_answer.content
-                )
-            else:
-                # Send an error message if something went wrong
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="something wrong happened, please try again",
-                )
-    # no functions were execute
-    else:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id, text=initial_response_message.content
-        )
+  prompt = generate_prompt(message_history)
+
+  prediction = client.predictions.create(version=version,
+                                         input={"prompt": prompt})
+  prediction.wait()
+
+  human_readable_output = ''.join(prediction.output).strip()
+
+  await context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text=human_readable_output)
+
+  message_history.append({"isUser": False, "text": human_readable_output})
+
+
+# async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     messages.append({"role": "user", "content": update.message.text})
+#     initial_response = openai.chat.completions.create(
+#         model="gpt-4o-mini", messages=messages, tools=functions
+#     )
+#     initial_response_message = initial_response.choices[0].message
+#     messages.append(initial_response_message)
+#     final_response = None
+#     tool_calls = initial_response_message.tool_calls
+#     if tool_calls:
+#         for tool_call in tool_calls:
+#             name = tool_call.function.name
+#             args = json.loads(tool_call.function.arguments)
+#             response = run_function(name, args)
+#             print(tool_calls)
+#             messages.append(
+#                 {
+#                     "tool_call_id": tool_call.id,
+#                     "role": "tool",
+#                     "name": name,
+#                     "content": str(response),
+#                 }
+#             )
+#             if name == "svg_to_png_bytes":
+#                 await context.bot.send_photo(
+#                     chat_id=update.effective_chat.id, photo=response
+#                 )
+#                 messages.append(
+#                     {
+#                         "tool_call_id": tool_call.id,
+#                         "role": "system",
+#                         "name": name,
+#                         "content": "Image was sent to the user, do not send the base64 string to them.",
+#                     }
+#                 )
+#             # Generate the final response
+#             final_response = openai.chat.completions.create(
+#                 model="gpt-4o-mini",
+#                 messages=messages,
+#             )
+#             final_answer = final_response.choices[0].message
+
+#             # Send the final response if it exists
+#             if final_answer:
+#                 messages.append(final_answer)
+#                 await context.bot.send_message(
+#                     chat_id=update.effective_chat.id, text=final_answer.content
+#                 )
+#             else:
+#                 # Send an error message if something went wrong
+#                 await context.bot.send_message(
+#                     chat_id=update.effective_chat.id,
+#                     text="something wrong happened, please try again",
+#                 )
+#     # no functions were execute
+#     else:
+#         await context.bot.send_message(
+#             chat_id=update.effective_chat.id, text=initial_response_message.content
+#         )
 
 
 if __name__ == "__main__":
