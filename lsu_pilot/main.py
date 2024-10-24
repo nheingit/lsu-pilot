@@ -102,14 +102,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             args = json.loads(tool_call.function.arguments)
             response = run_function(name, args)
             print(tool_calls)
-            messages.append(
-                {
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "name": name,
-                    "content": str(response),
-                }
-            )
             if name == "svg_to_png_bytes":
                 await context.bot.send_photo(
                     chat_id=update.effective_chat.id, photo=response
@@ -117,9 +109,18 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 messages.append(
                     {
                         "tool_call_id": tool_call.id,
-                        "role": "system",
+                        "role": "tool",
                         "name": name,
-                        "content": "Image was sent to the user, do not send the base64 string to them.",
+                        "content": str(response) + "Image was sent to the user, do not send the base64 string to them. Only send back 'here is the svg rendered as requested'",
+                    }
+                )
+            else:
+                messages.append(
+                    {
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": name,
+                        "content": str(response),
                     }
                 )
             # Generate the final response
