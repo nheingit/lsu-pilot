@@ -15,6 +15,7 @@ tiktoken = "^0.7.0"
 langchain = "^0.2.12"
 numpy = "^1.21"
 scipy = "^1.14.0"
+cairosvg = "^2.7.1"
 
 
 [build-system]
