@@ -14,6 +14,9 @@ import pandas as pd
 import numpy as np
 import json
 import requests
+import time
+import io
+import mimetypes
 
 from .questions import answer_question
 from .functions import functions, run_function
@@ -55,6 +58,18 @@ Make sure All HTML is generated with the JSX flavoring.
 
 tg_bot_token = os.getenv("TG_BOT_TOKEN")
 openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+assistant = openai.beta.assistants.create(
+    name="Telegram Bot",
+    instructions=CODE_PROMPT + "\nYou can analyze files and create visualizations using Python's data analysis and plotting libraries.",
+    tools=[
+        {"type": "code_interpreter"},
+        {"type": "function", "function": functions[0]},
+        {"type": "function", "function": functions[1]}
+    ],
+    model="gpt-4o",
+)
+
+THREAD = openai.beta.threads.create()
 # Get the directory of the current script
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -63,14 +78,6 @@ csv_path = os.path.join(current_dir, "processed", "embeddings.csv")
 df = pd.read_csv(csv_path, index_col=0)
 df["embeddings"] = df["embeddings"].apply(eval).apply(np.array)
 
-
-messages = [
-    {
-        "role": "system",
-        "content": "You are a helpful assistant that answers questions.",
-    },
-    {"role": "system", "content": CODE_PROMPT},
-]
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -81,7 +88,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=update.effective_chat.id, text="I'm a bot, please talk to me!"
     )
-
 
 async def mozilla(update: Update, context: ContextTypes.DEFAULT_TYPE):
     answer = answer_question(df, question=update.message.text, debug=True)
@@ -96,11 +102,11 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
   image_response = requests.get(image_url)
   await context.bot.send_photo(chat_id=update.effective_chat.id,
                                photo=image_response.content)
-
+                               
 async def transcribe_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  # Make sure we have a voice file to transcribe
-  voice_id = update.message.voice.file_id
-  if voice_id:
+    # Safety Check
+    voice_id = update.message.voice.file_id
+    if voice_id:
         file = await context.bot.get_file(voice_id)
         await file.download_to_drive(f"voice_note_{voice_id}.ogg")
         await update.message.reply_text("Voice note downloaded, transcribing now")
@@ -108,9 +114,107 @@ async def transcribe_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         transcript = openai.audio.transcriptions.create(
             model="whisper-1", file=audio_file
         )
-        await update.message.reply_text(
-            f"Transcript finished:\n {transcript.text}"
+        message = openai.beta.threads.messages.create(
+            thread_id=THREAD.id, role="user", content=transcript.text
         )
+        run = openai.beta.threads.runs.create(
+            thread_id=THREAD.id, assistant_id=assistant.id
+        )
+        await update.message.reply_text(
+            f"Transcript finished:\n {transcript.text}\n processing request"
+        )
+        run = wait_on_run(run, THREAD)
+        # if we did a function call, run the function and update the thread's state
+        if run.status == "requires_action":
+            print(run.required_action.submit_tool_outputs.tool_calls)
+            tool_call = run.required_action.submit_tool_outputs.tool_calls[0]
+            name = tool_call.function.name
+            args = json.loads(tool_call.function.arguments)
+            response = run_function(name, args)
+            if name in ("svg_to_png_bytes"):
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id, photo=response
+                )
+            if name in ("generate_image"):
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id, photo=response.content
+                )
+                run = openai.beta.threads.runs.cancel(
+                    thread_id=THREAD.id, run_id=run.id
+                )
+                run = wait_on_run(run, THREAD)
+                return
+            run = openai.beta.threads.runs.submit_tool_outputs(
+                thread_id=THREAD.id,
+                run_id=run.id,
+                tool_outputs=[
+                    {"tool_call_id": tool_call.id, "output": json.dumps(str(response))}
+                ],
+            )
+            run = wait_on_run(run, THREAD)
+        # Retrieve the message object
+        messages = openai.beta.threads.messages.list(
+            thread_id=THREAD.id, order="asc", after=message.id
+        )
+        # Extract the message content
+        message_content = messages.data[0].content[0].text
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, text=message_content.value
+        )
+
+def wait_on_run(run, thread):
+    while run.status in ("queued", "in_progress"):
+        print(run.status)
+        run = openai.beta.threads.runs.retrieve(
+            thread_id=thread.id,
+            run_id=run.id,
+        )
+        time.sleep(0.5)
+    return run
+
+async def assistant_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = openai.beta.threads.messages.create(
+        thread_id=THREAD.id, role="user", content=update.message.text
+    )
+    run = openai.beta.threads.runs.create(
+        thread_id=THREAD.id, assistant_id=assistant.id
+    )
+    run = wait_on_run(run, THREAD)
+    # if we did a function call, run the function and update the thread's state
+    if run.status == "requires_action":
+        print(run.required_action.submit_tool_outputs.tool_calls)
+        tool_call = run.required_action.submit_tool_outputs.tool_calls[0]
+        name = tool_call.function.name
+        args = json.loads(tool_call.function.arguments)
+        response = run_function(name, args)
+        if name in ("generate_image"):
+          run = openai.beta.threads.runs.cancel(thread_id=THREAD.id, run_id=run.id)
+          run = wait_on_run(run, THREAD)
+          await context.bot.send_photo(
+              chat_id=update.effective_chat.id, photo=response.content
+          )
+          return
+        if name in ("svg_to_png_bytes"):
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id, photo=response
+            )
+        run = openai.beta.threads.runs.submit_tool_outputs(
+            thread_id=THREAD.id,
+            run_id=run.id,
+            tool_outputs=[
+                {"tool_call_id": tool_call.id, "output": json.dumps(str(response))}
+            ],
+        )
+        run = wait_on_run(run, THREAD)
+    # Retrieve the message object
+    messages = openai.beta.threads.messages.list(
+        thread_id=THREAD.id, order="asc", after=message.id
+    )
+    # Extract the message content
+    message_content = messages.data[0].content[0].text
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, text=message_content.value
+    )
 
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -173,20 +277,96 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id, text=initial_response_message.content
         )
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Get document info
+    document = update.message.document
+    file = await context.bot.get_file(document.file_id)
+    
+    # Download the file
+    file_bytes = await file.download_as_bytearray()
+    
+    # Upload file to OpenAI
+    uploaded_file = openai.files.create(
+        file=io.BytesIO(file_bytes),
+        purpose='assistants'
+    )
+    
+    await update.message.reply_text(f"File received and uploaded. Processing...")
+    
+    # Create message with file attachment at thread level
+    message = openai.beta.threads.messages.create(
+        thread_id=THREAD.id,
+        role="user",
+        content="Please analyze this file and create some visualizations that help understand the data.",
+        attachments=[
+            {
+                "file_id": uploaded_file.id,
+                "tools": [{"type": "code_interpreter"}]
+            }
+        ]
+    )
+    
+    # Create a run
+    run = openai.beta.threads.runs.create(
+        thread_id=THREAD.id,
+        assistant_id=assistant.id
+    )
+    
+    run = wait_on_run(run, THREAD)
+    
+    # Get the response messages
+    messages = openai.beta.threads.messages.list(
+        thread_id=THREAD.id,
+        order="asc",
+        after=message.id
+    )
+    
+    # Process each message
+    for msg in messages.data:
+        for content in msg.content:
+            if content.type == "text":
+                text_content = content.text.value
+                # Check for file annotations
+                if hasattr(content.text, 'annotations'):
+                    for annotation in content.text.annotations:
+                        if annotation.type == "file_path":
+                            # Download the referenced file
+                            file_data = openai.files.content(annotation.file_path.file_id)
+                            file_bytes = file_data.read()
+                            # Send as document if it's not an image
+                            await context.bot.send_document(
+                                chat_id=update.effective_chat.id,
+                                document=file_bytes,
+                                filename=annotation.text.split('/')[-1]
+                            )
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=text_content
+                )
+            elif content.type == "image_file":
+                # Download and send the image
+                image_data = openai.files.content(content.image_file.file_id)
+                image_bytes = image_data.read()
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=image_bytes
+                )
 
 if __name__ == "__main__":
     application = ApplicationBuilder().token(tg_bot_token).build()
 
     start_handler = CommandHandler("start", start)
-    chat_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), chat)
+    chat_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), assistant_chat)
     mozilla_handler = CommandHandler("mozilla", mozilla)
     image_handler = CommandHandler('image', image)
     voice_handler = MessageHandler(filters.VOICE, transcribe_message)
+    document_handler = MessageHandler(filters.Document.ALL, handle_document)
 
     application.add_handler(voice_handler)
     application.add_handler(start_handler)
     application.add_handler(chat_handler)
     application.add_handler(image_handler)
     application.add_handler(mozilla_handler)
+    application.add_handler(document_handler)
 
     application.run_polling()
