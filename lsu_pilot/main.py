@@ -87,7 +87,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=update.effective_chat.id, text="I'm a bot, please talk to me!"
     )
 
-
 async def mozilla(update: Update, context: ContextTypes.DEFAULT_TYPE):
     answer = answer_question(df, question=update.message.text, debug=True)
     await context.bot.send_message(chat_id=update.effective_chat.id, text=answer)
