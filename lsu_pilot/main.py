@@ -15,6 +15,8 @@ import numpy as np
 import json
 import requests
 import time
+import io
+import mimetypes
 
 from .questions import answer_question
 from .functions import functions, run_function
@@ -58,7 +60,7 @@ tg_bot_token = os.getenv("TG_BOT_TOKEN")
 openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 assistant = openai.beta.assistants.create(
     name="Telegram Bot",
-    instructions=CODE_PROMPT,
+    instructions=CODE_PROMPT + "\nYou can analyze files and create visualizations using Python's data analysis and plotting libraries.",
     tools=[
         {"type": "code_interpreter"},
         {"type": "function", "function": functions[0]},
@@ -275,6 +277,80 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id, text=initial_response_message.content
         )
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Get document info
+    document = update.message.document
+    file = await context.bot.get_file(document.file_id)
+    
+    # Download the file
+    file_bytes = await file.download_as_bytearray()
+    
+    # Upload file to OpenAI
+    uploaded_file = openai.files.create(
+        file=io.BytesIO(file_bytes),
+        purpose='assistants'
+    )
+    
+    await update.message.reply_text(f"File received and uploaded. Processing...")
+    
+    # Create message with file attachment at thread level
+    message = openai.beta.threads.messages.create(
+        thread_id=THREAD.id,
+        role="user",
+        content="Please analyze this file and create some visualizations that help understand the data.",
+        attachments=[
+            {
+                "file_id": uploaded_file.id,
+                "tools": [{"type": "code_interpreter"}]
+            }
+        ]
+    )
+    
+    # Create a run
+    run = openai.beta.threads.runs.create(
+        thread_id=THREAD.id,
+        assistant_id=assistant.id
+    )
+    
+    run = wait_on_run(run, THREAD)
+    
+    # Get the response messages
+    messages = openai.beta.threads.messages.list(
+        thread_id=THREAD.id,
+        order="asc",
+        after=message.id
+    )
+    
+    # Process each message
+    for msg in messages.data:
+        for content in msg.content:
+            if content.type == "text":
+                text_content = content.text.value
+                # Check for file annotations
+                if hasattr(content.text, 'annotations'):
+                    for annotation in content.text.annotations:
+                        if annotation.type == "file_path":
+                            # Download the referenced file
+                            file_data = openai.files.content(annotation.file_path.file_id)
+                            file_bytes = file_data.read()
+                            # Send as document if it's not an image
+                            await context.bot.send_document(
+                                chat_id=update.effective_chat.id,
+                                document=file_bytes,
+                                filename=annotation.text.split('/')[-1]
+                            )
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=text_content
+                )
+            elif content.type == "image_file":
+                # Download and send the image
+                image_data = openai.files.content(content.image_file.file_id)
+                image_bytes = image_data.read()
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=image_bytes
+                )
 
 if __name__ == "__main__":
     application = ApplicationBuilder().token(tg_bot_token).build()
@@ -284,11 +360,13 @@ if __name__ == "__main__":
     mozilla_handler = CommandHandler("mozilla", mozilla)
     image_handler = CommandHandler('image', image)
     voice_handler = MessageHandler(filters.VOICE, transcribe_message)
+    document_handler = MessageHandler(filters.Document.ALL, handle_document)
 
     application.add_handler(voice_handler)
     application.add_handler(start_handler)
     application.add_handler(chat_handler)
     application.add_handler(image_handler)
     application.add_handler(mozilla_handler)
+    application.add_handler(document_handler)
 
     application.run_polling()
